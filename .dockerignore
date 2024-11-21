@@ -1,0 +1,9 @@
+*
+!requirements.txt
+!MANIFEST.in
+!setup.py
+!script/setup
+!script/run
+!sonushandler/*.py
+!docker/run
+!sounds/*.wav
