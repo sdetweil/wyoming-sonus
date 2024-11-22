@@ -40,13 +40,6 @@ class State(Enum):
     SPEAKING = auto()               # audio out
     WAITING = auto()                # waiting for asr to reply
 
-Mic_handler : (AsyncClient) = None;    
-Hotword_Handler : (AsyncClient) = None;
-SpeechReco_Handler : (AsyncClient) = None;
-TTS_handler : (AsyncClient) = None;
-Speaker_Handler : (AsyncClient) = None;
-
-
 class SonusEventHandler(AsyncEventHandler):
     """Event handler for clients."""
 
