@@ -7,13 +7,16 @@ import logging
 import sys
 import json
 
-#from functools import partial
+from functools import partial
 from pathlib import Path
 #from wyoming.info import  AsrModel, AsrProgram, Attribution, Info
-#from wyoming.info import Attribution, Info
-#from wyoming.server import AsyncServer, AsyncTcpServer
+from wyoming.info import Attribution, Info
+from .sonus import SonusProgram, SonusModel
+from wyoming.server import AsyncServer
 
+from .sonus_handler import SonusBase
 from .event_handler import SonusEventHandler
+
 
 _LOGGER = logging.getLogger()
 _DIR = Path(__file__).parent
@@ -33,7 +36,7 @@ async def main() -> None:
     config_info = None
     """Main entry point."""
     parser = argparse.ArgumentParser()
-    parser.add_argument("--socket_address", help="url to socket server")
+    parser.add_argument("--uri", help="URI for this Wyoming sonus service")
     # Sounds
     parser.add_argument(
         "--config", help="json file holding config parms"
@@ -44,10 +47,6 @@ async def main() -> None:
 
     logging.basicConfig(level=logging.DEBUG if args.debug else logging.INFO)
 
-    _LOGGER.debug("socket_address=%s",args.socket_address)
-    if args.socket_address is None:
-        args.socket_address="http://localhost:8080"
-
     _LOGGER.info("testing")
     _LOGGER.debug(args)
 
@@ -55,15 +54,15 @@ async def main() -> None:
         config_info = json.load(f)
     _LOGGER.debug(config_info)
 
-    instance = asyncio.create_task(SonusEventHandler(config_info,args,None, None).runit())    
-    await instance
+    service = SonusBase(config_info,args,None, None)
 
-    '''
+    instance = asyncio.create_task(service.runit())    
+        
     wyoming_info = Info(
         asr=[
-            AsrProgram(
-                name="google-streaming",
-                description="google cloud streaming asr",
+            SonusProgram(
+                name="sonus handler",
+                description="wyoming local app model",
                 attribution=Attribution(
                     name="Sam Detweiler",
                     url="https://github.com/sdetweil/google-streaming-asr",
@@ -71,9 +70,9 @@ async def main() -> None:
                 installed=True,
                 version="1.0.0",
                 models=[
-                    AsrModel(
-                        name="google-streaming",
-                        description="google cloud streaming asr",
+                    SonusModel(
+                        name="sonus handler",
+                        description="wyoming local app model",
                         attribution=Attribution(
                             name="rhasspy",
                             url="https://github.com/rhasspy/models/",
@@ -87,22 +86,23 @@ async def main() -> None:
         ]
     )
     
-    server = AsyncServer
-    if not server:
-        _LOGGER.debug("server didn't start")
-    _LOGGER.debug(wyoming_info)
-    #model_lock = asyncio.Lock()
-    _LOGGER.debug("calling server")
-    await server.run(        
-        partial(
-            SonusEventHandler,
-            wyoming_info,
-            args,
-            0,
-            None #model_lock
+    server = AsyncServer.from_uri(args.uri)
+    try:
+        await server.run(        
+            partial(
+                SonusEventHandler,
+                wyoming_info,
+                args,
+                0,
+                None #model_lock
+            )
         )
-    )
-    '''
+    except KeyboardInterrupt:
+        pass
+    finally:
+        await service._stop()
+        await instance
+
     #_LOGGER("exiting")
 
 # -----------------------------------------------------------------------------

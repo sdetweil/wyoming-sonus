@@ -4,6 +4,7 @@
     "tts_address": "localhost:10200",
     "snd_address": "localhost:10601",
     "voice_output": 1,
+    "speaking": 0,
     "service_reconnect_seconds":5,    
     "vad":{
         "threshold": 0.5,

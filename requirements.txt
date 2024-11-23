@@ -2,4 +2,3 @@ wyoming==1.6.0
 zeroconf==0.88.0
 pyring-buffer==1.0.0
 pysilero-vad==1.0.0
-python-socketio==5.1
