@@ -10,12 +10,14 @@ you need to edit the config.json to identify where the appropriate services are 
 
 this runs the full engine, mic/hotword/and reco via connected services defined in config.json
 they can be local, in docker, or remote
-
+```text
 microphone(mic)
 hotword (wake/hotword)
 speech to text (asr)
 tts (text to speech)  // coming soon
 snd (sound out)       // coming soon
+```
+in the config file
 ```json
 {   
     "mic_address": "localhost:10600",
@@ -31,10 +33,9 @@ snd (sound out)       // coming soon
 script/run --uri=tcp://localhost:9876 --debug --config=$(pwd)/sonushandler/config.json 2>&1 | tee -a somefile.txt
 ```
 
-
-
 this supports a new Event type sent from the outside, Speak("text to speak") 
 this does the Synthesize(using the configured service endpoint, config.json again) and audio play (to the sound out service) 
+
 
 the app connected can send the Speek(text="......")  request (in json format) // coming soon
 
