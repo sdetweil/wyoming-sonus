@@ -102,7 +102,7 @@ class SonusBase:
 
         # Timestamp in the future when we will have timed out (set with
         # time.monotonic())
-        self.timeout_seconds: Optional[float] = None
+        #self.timeout_seconds: Optional[float] = None
 
         # Audio from right before speech starts (circular buffer)
         self.vad_buffer: Optional[RingBuffer] = None
@@ -398,6 +398,7 @@ class SonusBase:
         # Only unpack chunk once
         chunk: Optional[AudioChunk] = None
         audio_bytes: bytes = None
+        '''
         if (
             self.is_streaming
             and (self.timeout_seconds is not None)
@@ -408,6 +409,7 @@ class SonusBase:
             self.timeout_seconds = None
             #await self.sendEvent(AudioStop().event(), self._wake_queue)
             #return True
+        '''    
         
         # not timeout 
         if not self.is_streaming:
@@ -421,12 +423,13 @@ class SonusBase:
 
             if not self.vad(audio_bytes):
                 # No speech
-                #p{J"""  """_LOGGER.debug("silence")
+                #_LOGGER.debug("silence")
                 if self.vad_buffer is not None:
                     self.vad_buffer.put(audio_bytes)
                 return True
             
             _LOGGER.debug("NOT silence")
+            '''
             if self.config_info['wake']['wake_word_timeout'] is not None:
                 # Set future time when we'll stop streaming if the wake word
                 # hasn't been detected.
@@ -436,6 +439,7 @@ class SonusBase:
             else:
                 # No timeout
                 self.timeout_seconds = None
+            '''    
 
             if self.vad_buffer is not None:
                 # Send contents of VAD buffer first. This is the audio that was
