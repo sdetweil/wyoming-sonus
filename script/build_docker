@@ -1,4 +1,4 @@
 #!/usr/bin/env bash
-docker buildx build . -t 'rhasspy/wyoming-sonus' --platform linux/amd64 "$@"  --load
+docker buildx build . -t 'rhasspy/wyoming-sonus'  --platform linux/amd64 "$@"  --load
 
-docker buildx build . -t 'rhasspy/wyoming-sonus' --platform linux/arm64 "$@"  --load
+#docker buildx build . -t 'rhasspy/wyoming-sonus' --platform linux/arm64 "$@"  --load

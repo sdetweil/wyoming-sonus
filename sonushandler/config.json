@@ -1,5 +1,5 @@
 {   "mic_address": "localhost:10600",
-    "wake_address": "localhost:10400",
+    "wake_address": "192.168.2.106:10400",
     "asr_address": "localhost:10555",
     "tts_address": "localhost:10200",
     "snd_address": "localhost:10601",
@@ -10,8 +10,7 @@
         "threshold": 0.5,
         "timeout": 2,
         "trigger_level":1,
-        "buffer_seconds":2.0,
-        "wake_word_timeout":3.0
+        "buffer_seconds":2.0
     },
     "mic":{
 
@@ -28,8 +27,10 @@
         "samples_per_chunk": 2048       
     },
     "wake":{
+        "wake_word_timeout":1.5
     },
-    "asr":{
+    "stt":{
+        "transcript_timeout":1.5
     },
     "tts":{
     }     

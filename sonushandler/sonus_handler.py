@@ -6,9 +6,6 @@ import sys
 import logging
 import time
 import math
-import socketio
-from aiohttp import web
-import uvicorn
 from array import array
 from enum import Enum, auto
 from pathlib import Path
@@ -66,10 +63,8 @@ class SonusBase:
         **kwargs,
     ) -> None:
         super().__init__() # *args, **kwargs)
-        
-        print("in init")
-        self.cli_args = cli_args
-        _LOGGER.debug("in init")        
+    
+        self.cli_args = cli_args     
         self.config_info =config_info
         #self.stdout_writer = stdout_writer
         #self.wyoming_info_event = wyoming_info.event()
@@ -91,6 +86,7 @@ class SonusBase:
         self.client_id = str(time.monotonic_ns())
         self.state:State = State.IDLE
         self.is_running:bool = False
+        self.mic_is_running: bool = False
         self.is_streaming:bool = False
         self.buffered_event: Event = None
         self.transcript:str = ""
@@ -151,7 +147,7 @@ class SonusBase:
                         _LOGGER.debug("sending event on to wakeword")
                         await self.forwardEvent(event, self._wake_queue)  
                         
-                        #asyncio.create_task(self.setTimeout(self.WW_timeout_task, self.config_info["vad"]["wake_word_timeout"],self._wake_queue, "wakeword timeout" ))
+                        #asyncio.create_task(self.setTimeout(self.WW_timeout_task, self.config_info["wake"]["wake_word_timeout"],self._wake_queue, "wakeword timeout" ))
                     else:
                         return False                        
                 else:
@@ -203,7 +199,7 @@ class SonusBase:
             await self.notifyManager(1, "hotword")
             sys.stdout.flush()            
             await self.sendEvent(Transcribe().event(), self._asr_queue)   
-            await self.setTimeout(self.reco_timeout_task, self.config_info["vad"]["wake_word_timeout"],self._asr_queue, "transcript timeout" )
+            await self.setTimeout(self.reco_timeout_task, self.config_info["stt"]["transcript_timeout"],self._asr_queue, "transcript timeout" )
 
         #
         #   this is Hotword  NOT detected.. timed out 
@@ -320,10 +316,7 @@ class SonusBase:
             self.vad_buffer = RingBuffer(maxlen=vad_buffer_bytes)        
         self._sendQueue= asyncio.Queue()              
         self.speakQueue = asyncio.Queue()        
-        self._connect_to_services(self.config_info)
-                
-        #if self.config_info['voice_output'] != 0:
-        #    await self.setupServer(self.cli_args.server_port)      
+        self._connect_to_services(self.config_info)                  
 
     async def _stop(self) -> None:
         """Disconnect from services."""
@@ -336,8 +329,27 @@ class SonusBase:
     async def stopped(self) -> None:
         """Called when satellite has stopped."""
 
+    async def stopMicService(self)-> None:    
+        if self._mic_task is not None:
+            try:
+                self.mic_is_running = False
+                self._mic_task.cancel()
+                self._mic_task = None
+            except:
+                pass    
+
+    def startMicService(self)->None:
+        if not self.config_info['mic_address'].endswith(":0"):
+            self.mic_is_running = True
+            _LOGGER.debug(
+                "Connecting to mic service: %s",
+                self.config_info['mic_address'],
+            )
+            self._mic_task = asyncio.create_task(self._mic_task_proc(self.config_info['mic_address']), name="mic")          
+
     async def started(self) -> None:
         """Called when satellite has started."""
+       
         while  True:
             await asyncio.sleep(24*60*60*1000)                 
 
@@ -406,11 +418,11 @@ class SonusBase:
                 return True
             
             _LOGGER.debug("NOT silence")
-            if self.config_info['vad']['wake_word_timeout'] is not None:
+            if self.config_info['wake']['wake_word_timeout'] is not None:
                 # Set future time when we'll stop streaming if the wake word
                 # hasn't been detected.
                 self.timeout_seconds = (
-                    time.monotonic() + self.config_info['vad']['wake_word_timeout']
+                    time.monotonic() + self.config_info['wake']['wake_word_timeout']
                 )
             else:
                 # No timeout
@@ -523,12 +535,13 @@ class SonusBase:
         #
         # enable mic last as it is streaming packets all the time
         #             
-        if not config_info['mic_address'].endswith(":0"):
-            _LOGGER.debug(
-                "Connecting to mic service: %s",
-                config_info['mic_address'],
-            )
-            self._mic_task = asyncio.create_task(self._mic_task_proc(config_info['mic_address']), name="mic")            
+        if 0 == 1:
+            if not config_info['mic_address'].endswith(":0"):
+                _LOGGER.debug(
+                    "Connecting to mic service: %s",
+                    config_info['mic_address'],
+                )
+                self._mic_task = asyncio.create_task(self._mic_task_proc(config_info['mic_address']), name="mic")            
 
         _LOGGER.info("Connected to services")
 
@@ -768,7 +781,7 @@ class SonusBase:
             except Exception:
                 pass  # ignore disconnect errors
 
-        while self.is_running:
+        while self.mic_is_running:
             try:
                 if mic_client is None:
                     mic_client = AsyncClient.from_uri("tcp://"+address)

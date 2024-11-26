@@ -9,9 +9,9 @@ import json
 
 from functools import partial
 from pathlib import Path
-#from wyoming.info import  AsrModel, AsrProgram, Attribution, Info
-from wyoming.info import Attribution, Info
-from .sonus import SonusProgram, SonusModel
+from wyoming.info import  AsrModel, AsrProgram, Attribution, Info
+#from wyoming.info import Attribution, Info
+#from .sonus import SonusProgram, SonusModel
 from wyoming.server import AsyncServer
 
 from .sonus_handler import SonusBase
@@ -33,6 +33,7 @@ async def connect_stdin_stdout():
 
 async def main() -> None:
     reader, writer = await connect_stdin_stdout()
+    server: AsyncServer
     config_info = None
     """Main entry point."""
     parser = argparse.ArgumentParser()
@@ -57,7 +58,8 @@ async def main() -> None:
     service = SonusBase(config_info,args,None, None)
 
     instance = asyncio.create_task(service.runit())    
-        
+
+    '''    
     wyoming_info = Info(
         asr=[
             SonusProgram(
@@ -85,25 +87,59 @@ async def main() -> None:
             )
         ]
     )
+    '''
+    wyoming_info = Info(
+        asr=[
+            AsrProgram(
+                name="google-streaming",
+                description="google cloud streaming asr",
+                attribution=Attribution(
+                    name="Sam Detweiler",
+                    url="https://github.com/sdetweil/wyominggoogle",
+                ),
+                installed=True,
+                version="1.0.0",
+                models=[
+                    AsrModel(
+                        name="google-streaming",
+                        description="google cloud streaming asr",
+                        attribution=Attribution(
+                            name="rhasspy",
+                            url="https://github.com/rhasspy/models/",
+                        ),
+                        version="1.0.0",
+                        installed=True,
+                        languages=""
+                    )
+                ]
+            )
+        ]
+    )
+
+
     
     server = AsyncServer.from_uri(args.uri)
-    try:
-        await server.run(        
-            partial(
-                SonusEventHandler,
-                wyoming_info,
-                args,
-                0,
-                None #model_lock
-            )
-        )
-    except KeyboardInterrupt:
-        pass
-    finally:
-        await service._stop()
-        await instance
+    _LOGGER.debug("setup AsyncServer %s",args.uri)
 
-    #_LOGGER("exiting")
+    #try:
+    await server.run(        
+        partial(
+            SonusEventHandler, #sillyEventHandler,
+            wyoming_info,
+            service, 
+            writer,
+            args
+        )
+    )
+    #except KeyboardInterrupt:
+    #    _LOGGER.debug("ending")
+    #    pass
+    #finally:
+    #    _LOGGER.debug("fribble")
+    #    await service._stop()
+    #    await instance
+
+    _LOGGER("exiting")
 
 # -----------------------------------------------------------------------------
 

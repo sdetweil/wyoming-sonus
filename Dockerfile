@@ -17,6 +17,7 @@ RUN script/setup
 COPY script/run ./script/
 COPY docker/run ./
 
+
 EXPOSE 8080
 
 ENTRYPOINT ["/app/run"]
