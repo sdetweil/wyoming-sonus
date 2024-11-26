@@ -18,8 +18,8 @@ from wyoming.info import Describe, Info
 from wyoming.server import AsyncEventHandler
 from .sonus  import Hotword, Command
 
-from wyoming.asr import  Transcribe
-from .xasr import xTranscript
+#from wyoming.asr import  Transcribe
+from .xasr import xTranscript, xTranscribe
 from wyoming.audio import AudioChunk, AudioStart, AudioStop
 from wyoming.client import AsyncClient, AsyncTcpClient
 from wyoming.error import Error
@@ -122,7 +122,7 @@ class SonusBase:
         _LOGGER.debug("Server disconnected")
     
     async def handle_event(self, event: Event) -> bool:
-        _LOGGER.debug("received event")
+        #_LOGGER.debug("received event")
 
         '''
             AudioChunk is the primary event type, from microphone, Synthesize text to speech
@@ -138,13 +138,15 @@ class SonusBase:
                         self.is_streaming = True
                         # set state to listening for hotword
                         self.state = State.LISTENING
-                        _LOGGER.debug("setting listening state. sending wake_detect to wakeword")
+                        #_LOGGER.debug("setting listening state. sending wake_detect to wakeword")
                         await self._send_wake_detect()
+                        '''
                         if not self.buffered_event == None:
                             _LOGGER.debug("sending VAD buffered event on to wakeword")
                             await self.forwardEvent(self.buffered_event, self._wake_queue)
                             self.buffered_event = None
-
+                        else: 
+                        '''
                         _LOGGER.debug("sending event on to wakeword")
                         await self.forwardEvent(event, self._wake_queue)  
                         
@@ -159,7 +161,7 @@ class SonusBase:
             elif self.state == State.LISTENING:    
                 # if listening for hotword, send to hotword handler
                 if await self.isSilence(event) is False:
-                    _LOGGER.debug("in listening state. sending Chunk to wakeword")
+                    #_LOGGER.debug("in listening state. sending Chunk to wakeword")
                     await self.forwardEvent(event, self._wake_queue) 
                 else:    
                     _LOGGER.debug("listening for wakeword, but heard silence.. start over")
@@ -170,8 +172,11 @@ class SonusBase:
                 # if processing speech to text
                 if self.state == State.PROCESSING_FOR_TEXT:
                    if await self.isSilence(event) is False:      
-                       _LOGGER.debug("sending chunk for speech reco")                 
-                       await self.forwardEvent(event, self._asr_queue)  
+                        _LOGGER.debug("sending chunk for speech reco")                 
+                        await self.forwardEvent(event, self._asr_queue) 
+                        if  self.reco_timeout_task is not None:
+                            self.reco_timeout_task.cancel()
+                            await self.setTimeout(self.reco_timeout_task, self.config_info["stt"]["transcript_timeout"],self._asr_queue, "transcript timeout" )                      
                    else:
                         _LOGGER.debug("was processing for text, now silence, trigger text")
                         self.state = State.WAITING                         
@@ -199,7 +204,7 @@ class SonusBase:
             print("===>hotword<===")
             await self.notifyManager(1, "hotword", False)
             sys.stdout.flush()            
-            await self.sendEvent(Transcribe().event(), self._asr_queue)   
+            await self.sendEvent(xTranscribe(sendPartials=True).event(), self._asr_queue)   
             await self.setTimeout(self.reco_timeout_task, self.config_info["stt"]["transcript_timeout"],self._asr_queue, "transcript timeout" )
 
         #
@@ -416,7 +421,7 @@ class SonusBase:
 
             if not self.vad(audio_bytes):
                 # No speech
-                _LOGGER.debug("silence")
+                #p{J"""  """_LOGGER.debug("silence")
                 if self.vad_buffer is not None:
                     self.vad_buffer.put(audio_bytes)
                 return True
@@ -437,7 +442,10 @@ class SonusBase:
                 # recorded right before speech was detected.
                 if chunk is None:
                     chunk = AudioChunk.from_event(event)
-
+                    audio_bytes = chunk.audio
+                    
+                self.vad_buffer.put(audio_bytes)
+                    
                 # send the prior saved buffer
                 self.buffered_event= AudioChunk(
                         rate=chunk.rate,
@@ -799,7 +807,7 @@ class SonusBase:
                         mic_client = None
                         continue   
 
-                _LOGGER.debug("reading from mic")
+                #_LOGGER.debug("reading from mic")
                 try:
                     event = await mic_client.read_event()
                 except: 
@@ -832,7 +840,7 @@ class SonusBase:
                     #continue
 
                 #await self.event_from_mic(event, audio_bytes)
-                _LOGGER.debug("sending event from mic task")
+                #_LOGGER.debug("sending event from mic task")
                 await self.handle_event(event)
             except asyncio.CancelledError:
                 _LOGGER.debug("mic asyncio canceled error")
@@ -1087,11 +1095,11 @@ class SonusBase:
 
                 if to_service_task in done:
                     # Event to go to wake service (audio)
-                    _LOGGER.debug("in wake to service")
+                    #_LOGGER.debug("in wake to service")
                     assert to_service_task is not None
                     event = to_service_task.result()
                     to_service_task = None
-                    _LOGGER.debug("wake event out = %s",event.type)
+                    #_LOGGER.debug("wake event out = %s",event.type)
                     await wake_client.write_event(event)
 
                 if from_service_task in done:
