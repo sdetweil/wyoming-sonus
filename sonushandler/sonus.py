@@ -38,6 +38,8 @@ class Command(Eventable):
     text: Optional[str] = None
     """Name of Command model to use"""
 
+    is_final: Optional[bool] = True
+
     @staticmethod
     def is_type(event_type: str) -> bool:
         return event_type == _COMMAND_TYPE
@@ -46,13 +48,14 @@ class Command(Eventable):
         data: Dict[str, Any] = {}
         if self.text is not None:
             data["text"] = self.text
+        data["is_final"] = self.is_final            
 
         return Event(type=_COMMAND_TYPE, data=data)
 
     @staticmethod
     def from_event(event: Event) -> "Command":
         data = event.data or {}
-        return Command(text=data.get("text"))
+        return Command(text=data.get("text"),is_final=data.get("is_final"))
     
 @dataclass
 class SonusModel(Artifact):

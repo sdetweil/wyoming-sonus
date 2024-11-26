@@ -18,7 +18,8 @@ from wyoming.info import Describe, Info
 from wyoming.server import AsyncEventHandler
 from .sonus  import Hotword, Command
 
-from wyoming.asr import Transcript, Transcribe
+from wyoming.asr import  Transcribe
+from .xasr import xTranscript
 from wyoming.audio import AudioChunk, AudioStart, AudioStop
 from wyoming.client import AsyncClient, AsyncTcpClient
 from wyoming.error import Error
@@ -196,7 +197,7 @@ class SonusBase:
             # start transcription
             _LOGGER.debug("change state to Transcribing")
             print("===>hotword<===")
-            await self.notifyManager(1, "hotword")
+            await self.notifyManager(1, "hotword", False)
             sys.stdout.flush()            
             await self.sendEvent(Transcribe().event(), self._asr_queue)   
             await self.setTimeout(self.reco_timeout_task, self.config_info["stt"]["transcript_timeout"],self._asr_queue, "transcript timeout" )
@@ -211,7 +212,7 @@ class SonusBase:
         #
         #   this is the Speech to text , text output
         #        
-        elif Transcript.is_type(event.type):
+        elif xTranscript.is_type(event.type):
             # heard from ASR with text string
             # echo out to surrounding process via stdout
             # set back to idle state
@@ -219,18 +220,21 @@ class SonusBase:
                 self.reco_timeout_task.cancel()
                 self.reco_timeout_task= None
 
-            self.transcript=event.data["text"];            
-            _LOGGER.debug("transcript response received ==>%s<==", self.transcript)
-            if self.speaking:
-                self.state = State.WAITING
-                _LOGGER.debug("sending Synthesize event")
-                await self.sendEvent(Synthesize(text=self.transcript).event(), self._tts_queue)               
-            else:
-                self.state = State.IDLE  
-                         
-            print("===>"+self.transcript+"<===")
-            await self.notifyManager(2, self.transcript)
-            sys.stdout.flush()
+            transcript=event.data["text"];    
+            print("===>"+transcript+"<===")
+            
+            sys.stdout.flush()       
+            if "is_final" in event.data and event.data["is_final"] is False :
+                _LOGGER.debug("more transcript to come")
+                await self.notifyManager(2, transcript, False)
+            else:    
+                await self.notifyManager(2, transcript, True)
+                self.state = State.IDLE               
+                _LOGGER.debug("transcript response received ==>%s<==", transcript)
+                if self.speaking:
+                    self.state = State.WAITING
+                    _LOGGER.debug("sending Synthesize event")
+                    await self.sendEvent(Synthesize(text=transcript).event(), self._tts_queue)               
 
         
         #         
@@ -356,13 +360,13 @@ class SonusBase:
     '''
         use socket io to notify outside app 
     '''
-    async def notifyManager(self,type:int,text:str)->None:
+    async def notifyManager(self,type:int,text:str, is_final:bool)->None:
         if self._writer is not None:
             event:Event =None
             if type == 1:
                 event=Hotword().event() 
             else:            
-                event=Command(text).event()   
+                event=Command(text, is_final).event()   
             _LOGGER.debug("sending event type=%s to access point", event.type)                                   
             await self.event_to_server(event) 
         else:
