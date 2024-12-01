@@ -10,7 +10,6 @@ from array import array
 from enum import Enum, auto
 from pathlib import Path
 from typing import Callable, Dict, Optional, Set, Union
-import json
 from pyring_buffer import RingBuffer
 from queue import Queue
 from wyoming.event import Event
@@ -33,7 +32,15 @@ from wyoming.wake import Detect, Detection, NotDetected
 
 from .vad import SileroVad
 
-_LOGGER = logging.getLogger()
+logging.basicConfig(
+    format='%(asctime)s.%(msecs)03d %(levelname)-8s %(message)s',
+    level=logging.DEBUG,
+    datefmt='%H:%M:%S'
+    )
+
+_LOGGER = logging.getLogger()  
+
+CONSECUTIVE_SILENCE_FRAMES = 10
 
 class State(Enum):
     IDLE = auto()                   # doing nothing
@@ -79,7 +86,7 @@ class SonusBase:
         self._snd_queue: "Optional[asyncio.Queue[Event]]" = None
         self._asr_task: Optional[asyncio.Task] = None
         self._asr_queue: "Optional[asyncio.Queue[Event]]" = None   
-        self.reco_timeout_task: Optional[asyncio.Task] = None
+        self.reco_timeout_task: int = 0 # Optional[asyncio.Task] = None
         self._tts_task: Optional[asyncio.Task] = None
         self._tts_queue: "Optional[asyncio.Queue[Event]]" = None  
         self.speakQueue: "Optional[asyncio.Queue[PrintRequest]]" = None 
@@ -96,10 +103,14 @@ class SonusBase:
         if self.config_info['speaking'] == 1:
             self.speaking = True
         self.connectedClients = []
+        self.finalTranscriptReceived:bool = False
+        self.FinalTranscriptRequested:bool = False
         self.vad = SileroVad(
             threshold=self.config_info['vad']['threshold'], trigger_level=self.config_info['vad']['trigger_level']
         )
-
+        self.frame_count:int = 0
+        
+        _LOGGER.debug("incremental transcription=%r",self.cli_args.incrementalTranscription)
         # Timestamp in the future when we will have timed out (set with
         # time.monotonic())
         #self.timeout_seconds: Optional[float] = None
@@ -122,7 +133,7 @@ class SonusBase:
         _LOGGER.debug("Server disconnected")
     
     async def handle_event(self, event: Event) -> bool:
-        #_LOGGER.debug("received event")
+        #
 
         '''
             AudioChunk is the primary event type, from microphone, Synthesize text to speech
@@ -130,89 +141,104 @@ class SonusBase:
                 it is positioned first as its more frequent                                                  
         '''        
         if AudioChunk.is_type(event.type):
+            #_LOGGER.debug("received event ="+ event.type)
             # if we are idle 
             if self.state is State.IDLE :
                 # if not silence
-                if await self.isSilence(event) is False:
+                if self.isSilence(event, CONSECUTIVE_SILENCE_FRAMES) is False:
+                    # set state to listening for hotword
                     if self.is_streaming is False:
                         self.is_streaming = True
-                        # set state to listening for hotword
-                        self.state = State.LISTENING
+                        self.setState( State.LISTENING )
                         #_LOGGER.debug("setting listening state. sending wake_detect to wakeword")
                         await self._send_wake_detect()
-                        '''
-                        if not self.buffered_event == None:
-                            _LOGGER.debug("sending VAD buffered event on to wakeword")
-                            await self.forwardEvent(self.buffered_event, self._wake_queue)
-                            self.buffered_event = None
-                        else: 
-                        '''
                         _LOGGER.debug("sending event on to wakeword")
                         await self.forwardEvent(event, self._wake_queue)  
-                        
-                        #asyncio.create_task(self.setTimeout(self.WW_timeout_task, self.config_info["wake"]["wake_word_timeout"],self._wake_queue, "wakeword timeout" ))
-                    else:
-                        return False                        
-                else:
-                    if self.state is State.PROCESSING_FOR_TEXT:
-                        self.state = State.IDLE
-                    return False;         
+                                    
+               # else:
+               #     if self.state is State.PROCESSING_FOR_TEXT:
+               #         self.setState( State.IDLE )
+               #     return True;         
 
             elif self.state == State.LISTENING:    
                 # if listening for hotword, send to hotword handler
-                if await self.isSilence(event) is False:
+                if self.isSilence(event, CONSECUTIVE_SILENCE_FRAMES*2) is False:
                     #_LOGGER.debug("in listening state. sending Chunk to wakeword")
                     await self.forwardEvent(event, self._wake_queue) 
                 else:    
                     _LOGGER.debug("listening for wakeword, but heard silence.. start over")
                     await  self.sendEvent(AudioStop().event(), self._wake_queue)
-                    self.state = State.IDLE
+                    self.is_streaming = False;
+                    self.setState( State.IDLE )
 
             elif self.state in (State.PROCESSING_FOR_TEXT , State.SPEAKING) :
                 # if processing speech to text
                 if self.state == State.PROCESSING_FOR_TEXT:
-                   if await self.isSilence(event) is False:      
-                        _LOGGER.debug("sending chunk for speech reco")                 
-                        await self.forwardEvent(event, self._asr_queue) 
-                        if  self.reco_timeout_task is not None:
-                            self.reco_timeout_task.cancel()
-                            await self.setTimeout(self.reco_timeout_task, self.config_info["stt"]["transcript_timeout"],self._asr_queue, "transcript timeout" )                      
+                   # if NOT silence
+                   if self.isSilence(event, CONSECUTIVE_SILENCE_FRAMES*4) is False:      
+                        _LOGGER.debug("sending chunk for speech reco")   
+                        await self.forwardEvent(event, self._asr_queue)                            
+                        if self.checkTimeout('self.reco_timeout_task') is True:      
+                            # still hearing sound past timeout, no transcript event yet, maybe mic hung?                      
+                            await self.triggerEndOfTranscript('self.reco_timeout_task')                            
+                        else:
+                            # lets give the speaker more time.
+                            self.setTimeout('self.reco_timeout_task', self.config_info["stt"]["transcript_timeout"],self._asr_queue, "transcript timeout", True )                      
                    else:
-                        _LOGGER.debug("was processing for text, now silence, trigger text")
-                        self.state = State.WAITING                         
-                        if  self.reco_timeout_task is not None:
-                            self.reco_timeout_task.cancel()
-                            self.reco_timeout_task= None    
-                            await self.clearQueue(self._wake_queue)   
-                        await self.sendEvent(AudioStop().event(), self._asr_queue)                                                                
+                        # now silence, user stopped speaking, add stop event on queue as last
+                        _LOGGER.debug("state=%s",self.state)
+                        if self.checkTimeout('self.reco_timeout_task') is True:                            
+                            await self.triggerEndOfTranscript('self.reco_timeout_task')                                                              
                 else:     
                     _LOGGER.debug("sending audio chunk to sound service")
                     await self.forwardEvent(event, self._snd_queue)                      
 
             elif self.state is State.WAITING:  
                 # waiting for the Transcription, toss all input  
-                _LOGGER.debug("waiting for transcription or something")
+                _LOGGER.debug("waiting for transcription or something, user still speaking?")
+                if self.isSilence(event, CONSECUTIVE_SILENCE_FRAMES) is False:
+                    _LOGGER.debug("user still speaking")
+                    #self.setTimeout('self.reco_timeout_task', self.config_info["stt"]["transcript_timeout"],self._asr_queue, "transcript timeout", True )                      
+                else:
+                    _LOGGER.debug("user not speaking, we are waiting for transcipt to arrive")
+                    if self.checkTimeout('self.reco_timeout_task') is True:      
+                        if self.FinalTranscriptRequested == True and self.finalTranscriptReceived == True:
+                             _LOGGER.debug("setting idle state ")
+                             self.is_streaming= False;
+                             self.setState(State.IDLE)                            
+                        else:
+                            # still hearing sound past timout, no transcript event yet, maybe mic hung?                      
+                            await self.triggerEndOfTranscript('self.reco_timeout_task')    
+                    else: 
+                        _LOGGER.debug("no transcript yet")            
+                _LOGGER.debug("waiting a little")
+                await asyncio.sleep(.5)
+
             
         #
         #   this is Hotword detection
         #            
         elif Detection.is_type(event.type):
             _LOGGER.debug("received hotword detection event")            
-            self.state = State.PROCESSING_FOR_TEXT
+            self.setState( State.PROCESSING_FOR_TEXT )
             # start transcription
             _LOGGER.debug("change state to Transcribing")
-            print("===>hotword<===")
+            print("===>hotword<===")                      
             await self.notifyManager(1, "hotword", False)
             sys.stdout.flush()            
-            await self.sendEvent(xTranscribe(sendPartials=True).event(), self._asr_queue)   
-            await self.setTimeout(self.reco_timeout_task, self.config_info["stt"]["transcript_timeout"],self._asr_queue, "transcript timeout" )
+            self.finalTranscriptReceived = False
+            self.FinalTranscriptRequested = False
+            await self.sendEvent(xTranscribe(sendPartials=self.cli_args.incrementalTranscription).event(), self._asr_queue)  
+            #
+            self.setTimeout('self.reco_timeout_task', self.config_info["stt"]["transcript_timeout"],self._asr_queue, "transcript timeout", False )
 
         #
         #   this is Hotword  NOT detected.. timed out 
         #        
         elif NotDetected.is_type(event.type):
             _LOGGER.debug("wake word said heard not wakeword")
-            self.state = State.IDLE
+            self.setState( State.IDLE )
+            self.is_streaming = False
         
         #
         #   this is the Speech to text , text output
@@ -221,9 +247,7 @@ class SonusBase:
             # heard from ASR with text string
             # echo out to surrounding process via stdout
             # set back to idle state
-            if  self.reco_timeout_task is not None:
-                self.reco_timeout_task.cancel()
-                self.reco_timeout_task= None
+
 
             transcript=event.data["text"];    
             print("===>"+transcript+"<===")
@@ -231,16 +255,21 @@ class SonusBase:
             sys.stdout.flush()       
             if "is_final" in event.data and event.data["is_final"] is False :
                 _LOGGER.debug("more transcript to come")
-                await self.notifyManager(2, transcript, False)
-            else:    
-                await self.notifyManager(2, transcript, True)
-                self.state = State.IDLE               
-                _LOGGER.debug("transcript response received ==>%s<==", transcript)
-                if self.speaking:
-                    self.state = State.WAITING
-                    _LOGGER.debug("sending Synthesize event")
-                    await self.sendEvent(Synthesize(text=transcript).event(), self._tts_queue)               
-
+                self.setTimeout('self.reco_timeout_task', self.config_info["stt"]["transcript_timeout"],self._asr_queue, "transcript timeout", True )
+                if self.state is not State.IDLE:
+                    await self.notifyManager(2, transcript, False)
+                return True
+            else:               
+                if self.state != State.IDLE:                
+                    await self.notifyManager(2, transcript, True)
+                    if self.cli_args.incrementalTranscription is True:
+                        self.finalTranscriptReceived = True                                                     
+                    _LOGGER.debug("transcript response received ==>%s<==", transcript)
+                    if self.speaking:
+                        self.setState( State.WAITING )
+                        _LOGGER.debug("sending Synthesize event")
+                        await self.sendEvent(Synthesize(text=transcript).event(), self._tts_queue)               
+                    return True
         
         #         
         #    elif SpeakText.is_type(event.type):
@@ -250,7 +279,7 @@ class SonusBase:
 
 
         #
-        #   this is Auudio Start output of the Text to Speech
+        #   this is Audio Start output of the Text to Speech
         #      we will just forward this to the sound out service
         #
         elif AudioStart.is_type(event.type) :
@@ -260,7 +289,7 @@ class SonusBase:
                 return True
             else:    
                 # audio back from TTS service
-                self.state = State.SPEAKING
+                self.setState( State.SPEAKING )
                 await self.forwardEvent(event, self._snd_queue) 
         
         elif AudioStop.is_type(event.type) :
@@ -268,28 +297,140 @@ class SonusBase:
             # no more audio from TTS service
             if self.state is State.SPEAKING:
                 await self.forwardEvent(event, self._snd_queue) 
-                #self.state = State.IDLE     
+                #self.setState( State.IDLE )    
 
         elif Played.is_type(event.type) :
             _LOGGER.debug("received Played event")
             #if self.state is State.SPEAKING:
-            self.state = State.IDLE   
+            self.setState( State.IDLE  ) 
 
         else:
             _LOGGER.debug("unexpected event received =%s",event.type)
         return True    
+    #
+    #  
+    #
+
+    def setState(self, value:State)->None:
+        self.state=value
+        self.frame_count = 0
+        
+    async def triggerEndOfTranscript(self, taskname:str)-> None:
+            _LOGGER.debug("was processing for text, now silence, trigger text")
+        #self.cancelTimeout(taskname)                                                                         
+        #if self.cli_args.incrementalTranscription is True and self.finalTranscriptReceived is True:                            
+        #    self.setState( State.IDLE ) 
+        #else:        
+            self.setState( State.WAITING )
+            # send an audio stop after any queued sounds
+            if not self.FinalTranscriptRequested:
+                self.FinalTranscriptRequested = True
+                await self.sendEvent(AudioStop().event(), self._asr_queue) 
+
+    def cancelTimeout(self,timerTask:str):
+        if timerTask == 'self.reco_timeout_task':
+            if self.reco_timeout_task is not 0:
+                self.reco_timeout_task= 0
+
+    async def cancelTimeout1(self,timerTask:str):
+        if timerTask == 'self.reco_timeout_task':
+            if self.reco_timeout_task is not None:
+                try:
+                    self.reco_timeout_task.cancel() 
+                finally:    
+                    _LOGGER.debug("task canceled")
+                    self.reco_timeout_task= None  
+            else:
+                _LOGGER.debug("no task to cancel")  
+        else:
+            _LOGGER.debug("unknown task to cancel")                     
+
+    #
+    #
+    #
+    def setVar(self,key:str, value:int)->None:
+        if key == 'self.reco_timeout_task':
+            self.reco_timeout_task = value    
+            if self.reco_timeout_task is 0 and value is not 0:
+                _LOGGER.debug("unable to set the task holder")
+    #
+
+    def setVar1(self,key:str, value:asyncio.Task)->None:
+        if key == 'self.reco_timeout_task':
+            self.reco_timeout_task = value    
+            if self.reco_timeout_task is None and value is not None:
+                _LOGGER.debug("unable to set the task holder")
+    #
+    #
+    #
+    def timeInMs(self)->int:
+        return int(time.time()*1000.0)
     
-    async def setTimeout(self,task, timeout, queue, message):
+    def setTimeout(self,taskname:str, timeout: Union[int, float], queue:asyncio.Queue, message: str, restart:bool) -> None:
+        '''
+        if restart is True:
+           if taskname == 'self.reco_timeout_task':
+                _LOGGER.debug("canceling "+taskname)                
+                self.setVar(taskname,0)
+        '''                
+        if taskname == 'self.reco_timeout_task':   
+            now = self.timeInMs()
+            self.reco_timeout_task =round((timeout*1000)+now)
+            _LOGGER.debug("new timeout set to %d now = %d", self.reco_timeout_task ,now)
+
+    def checkTimeout(self, taskname:str)-> bool:
+        if taskname == 'self.reco_timeout_task':
+            now = self.timeInMs()
+            _LOGGER.debug("checking timeout %d < now = %d",self.reco_timeout_task, now )
+            if self.reco_timeout_task < now:
+                _LOGGER.debug("timeout")
+                return True
+            else:
+                return False
+
+    async def setTimeout1(self,taskname:str, timeout: Union[int, float], queue:asyncio.Queue, message: str, restart:bool) -> None:
+        if restart is True:
+           if taskname == 'self.reco_timeout_task':
+                _LOGGER.debug("canceling "+taskname)
+                self.reco_timeout_task.cancel()
+                self.setVar(taskname,None)
         try: 
+            _LOGGER.debug("starting timer for "+message+ " for %f seconds sleep delay=%f", timeout, timeout+1)
             async with asyncio.timeout(timeout):                
                 task= asyncio.create_task(self.sleeproutine(timeout+1)) # force longer than 
-            await task
-                                
-        except TimeoutError:                
-                self.state=State.LISTENING
-                task=None
-                _LOGGER.debug(message)
-                await self.sendEvent(AudioStop().event(), queue)
+                self.setVar(taskname, task)
+                await task
+            _LOGGER.debug("timer task await is over-------------------------")
+
+        except asyncio.TimeoutError:             
+            _LOGGER.debug("wait for asr =====  timeout") 
+        except TimeoutError:             
+            _LOGGER.debug("wait for asr =====  sleep timeout")                                   
+        except asyncio.CancelledError:  
+            _LOGGER.debug("timer canceled, do nothing")              
+            return                 
+        else:                           
+            _LOGGER.debug("setTimeout finally")   
+            #if self.cli_args.incrementalTranscription != True or self.finalTranscriptReceived != False:
+            self.setState(State.LISTENING)
+            self.setVar(taskname,0)
+            _LOGGER.debug(message)
+            await self.sendEvent(AudioStop().event(), queue)
+            #else:
+            #    _LOGGER.debug("wait ended, no actions")    
+
+    '''
+        dummy routine to use for timeout handling
+        this routine should never actually DO anything other than sleep
+    '''    
+    
+    async def sleeproutine(self, time) -> None:
+        #try:
+            await asyncio.sleep(time)
+        #except TimeoutError:
+        #    _LOGGER.debug("sleep routine timeout error")            
+        #except asyncio.CancelledError:
+        #    _LOGGER.debug("sleep routine asyncio canceled")                
 
     async def event_from_server(self, event: Event) -> None:
         await self.handle_event(event)
@@ -333,7 +474,7 @@ class SonusBase:
         self._writer = None
 
         await self._disconnect_from_services()
-        self.state = State.STOPPED
+        self.setState( State.STOPPED )
 
     async def stopped(self) -> None:
         """Called when satellite has stopped."""
@@ -377,16 +518,7 @@ class SonusBase:
         else:
             _LOGGER.debug("no service manager connected")            
     
-    '''
-        dummy routine to use for timeout handling
-        this routine should never actually DO anything other than sleep
-    '''    
-    
-    async def sleeproutine(self, time) -> None:
-        try:
-            await asyncio.sleep(time)
-        except asyncio.CancelledError:
-            _LOGGER.debug("sleep asyncio canceled error")
+
 
     '''
         check the current buffer stream for silence
@@ -394,7 +526,7 @@ class SonusBase:
         and need to send those if NOT silence
     '''
 
-    async def isSilence(self,event) -> bool:
+    def isSilence(self,event, max_silence_frames) -> bool:
         # Only unpack chunk once
         chunk: Optional[AudioChunk] = None
         audio_bytes: bytes = None
@@ -409,26 +541,35 @@ class SonusBase:
             self.timeout_seconds = None
             #await self.sendEvent(AudioStop().event(), self._wake_queue)
             #return True
+        '''           
+        self.frame_count +=1
+      
+            # not timeout 
+            #if not self.is_streaming:
+                # Check VAD
+        chunk = AudioChunk.from_event(event)
+
+        audio_bytes = chunk.audio
+        sound_heard = self.vad(audio_bytes)
+        '''
+        if not vad:
+            _LOGGER.debug("silence frame")
+        else:
+            _LOGGER.debug("not silence frame")
         '''    
-        
-        # not timeout 
-        if not self.is_streaming:
-            # Check VAD
-            if audio_bytes is None:
-                if chunk is None:
-                    # Need to unpack
-                    chunk = AudioChunk.from_event(event)
-
-                audio_bytes = chunk.audio
-
-            if not self.vad(audio_bytes):
+        if self.is_streaming == False or self.frame_count > max_silence_frames:
+        #if 1 == 1:
+            if not sound_heard:
                 # No speech
-                #_LOGGER.debug("silence")
-                if self.vad_buffer is not None:
-                    self.vad_buffer.put(audio_bytes)
+                _LOGGER.debug("silence")
+                #if self.vad_buffer is not None:
+                #    self.vad_buffer.put(audio_bytes)    
+                #self.frame_count = 0     
+                #self._reset_vad()          
                 return True
             
             _LOGGER.debug("NOT silence")
+            
             '''
             if self.config_info['wake']['wake_word_timeout'] is not None:
                 # Set future time when we'll stop streaming if the wake word
@@ -439,7 +580,7 @@ class SonusBase:
             else:
                 # No timeout
                 self.timeout_seconds = None
-            '''    
+                
 
             if self.vad_buffer is not None:
                 # Send contents of VAD buffer first. This is the audio that was
@@ -457,8 +598,9 @@ class SonusBase:
                         channels=chunk.channels,
                         audio=self.vad_buffer.getvalue(),
                     ).event()
+            '''         
 
-            self._reset_vad()
+        #self._reset_vad()
         return False
     
     '''
@@ -525,7 +667,7 @@ class SonusBase:
         if config_info['snd']['enabled'] == 1 :
             self._snd_task = asyncio.create_task(self._snd_task_proc(config_info['snd_address']), name="snd")
 
-        if not config_info['wake_address'].endswith(":0"):
+        if config_info['wake']['enabled'] == 1:                               
             _LOGGER.debug(
                 "Connecting to wake service: %s",
                 config_info['wake_address'],
@@ -533,7 +675,7 @@ class SonusBase:
             self._wake_task = asyncio.create_task(self._wake_task_proc(config_info['wake_address']), name="wake")
 
 
-        if not config_info['asr_address'].endswith(":0"):
+        if config_info['stt']['enabled'] == 1:
             _LOGGER.debug(
                 "Connecting to asr service: %s",
                 config_info['asr_address'],
@@ -541,7 +683,7 @@ class SonusBase:
             self._asr_task = asyncio.create_task(self._asr_task_proc(config_info['asr_address']), name="event"
             )
 
-        if not config_info['tts_address'].endswith(":0"):
+        if config_info['tts']['enabled'] == 1:
             _LOGGER.debug(
                 "Connecting to tts service: %s",
                 config_info['tts_address'],
@@ -552,7 +694,7 @@ class SonusBase:
         # enable mic last as it is streaming packets all the time
         #             
         if 0 == 1:
-            if not config_info['mic_address'].endswith(":0"):
+            if config_info['mic']['enabled'] == 1:
                 _LOGGER.debug(
                     "Connecting to mic service: %s",
                     config_info['mic_address'],
@@ -633,11 +775,11 @@ class SonusBase:
 
                 if to_service_task in done:
                     # Event to go to asr service (speech reco)
-                    _LOGGER.debug("in asr to service")
+                    #_LOGGER.debug("in asr to service")
                     assert to_service_task is not None
                     event = to_service_task.result()
                     to_service_task = None
-                    _LOGGER.debug("asr event out = %s",event.type)
+                    #_LOGGER.debug("asr event out = %s",event.type)
                     await asr_client.write_event(event)
 
                 if from_service_task in done:
@@ -645,7 +787,8 @@ class SonusBase:
                     _LOGGER.debug("in asr from service")                    
                     assert from_service_task is not None
                     event = from_service_task.result()
-                    _LOGGER.debug("asr event in = %s",event.type)
+                    if event is not None:
+                        _LOGGER.debug("asr event in = %s",event.type)
                     from_service_task = None
 
                     if event is None:

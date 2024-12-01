@@ -7,7 +7,7 @@ RUN apt-get update && \
     apt-get install --yes --no-install-recommends avahi-utils
 
 WORKDIR /app
-
+RUN mkdir -p script
 COPY script/setup ./script/
 COPY setup.py requirements.txt MANIFEST.in ./
 COPY sonushandler/ ./sonushandler/

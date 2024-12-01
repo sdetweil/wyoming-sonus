@@ -17,6 +17,11 @@ from wyoming.server import AsyncServer
 from .sonus_handler import SonusBase
 from .event_handler import SonusEventHandler
 
+logging.basicConfig(
+            format='%(asctime)s %(levelname)-8s %(message)s',
+            level=logging.DEBUG,
+            datefmt='%Y-%m-%d %H:%M:%S'
+            )
 
 _LOGGER = logging.getLogger()
 _DIR = Path(__file__).parent
@@ -32,7 +37,10 @@ async def connect_stdin_stdout():
 
 
 async def main() -> None:
+    #logging.basicConfig(level=logging.DEBUG)
+    _LOGGER.debug("in main")
     reader, writer = await connect_stdin_stdout()
+    _LOGGER.debug("after reader/writer")
     server: AsyncServer
     config_info = None
     """Main entry point."""
@@ -43,10 +51,13 @@ async def main() -> None:
         "--config", help="json file holding config parms"
     )
 
-    parser.add_argument("--debug", action="store_true", help="Log DEBUG messages")
-    args = parser.parse_args()
+    parser.add_argument(
+        "--incrementalTranscription", action="store_true", help="should this service support incremental speech transcription"
+    )
 
-    logging.basicConfig(level=logging.DEBUG if args.debug else logging.INFO)
+    parser.add_argument("--debug", action="store_true", help="Log DEBUG messages")
+
+    args = parser.parse_args()
 
     _LOGGER.info("testing")
     _LOGGER.debug(args)

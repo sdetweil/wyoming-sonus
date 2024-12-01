@@ -1,3 +1,4 @@
 #!/usr/bin/env bash
+echo "$@"
 /app/script/run \
-     "--uri=tcp://localhost:8080" "$@"
+     --uri "tcp://0.0.0.0:8080" "$@"
