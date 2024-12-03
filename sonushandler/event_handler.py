@@ -58,7 +58,7 @@ class SonusEventHandler(AsyncEventHandler):
 
     async def disconnect(self) -> None:
         """Server disconnect."""
-        _LOGGER.debug("client disonnected")
+        _LOGGER.debug("client disconnected")
         await self.sonus.stopMicService()
         if self.sonus.server_id == self.client_id:
             self.sonus.clear_server()

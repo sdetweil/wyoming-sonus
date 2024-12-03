@@ -87,6 +87,7 @@ class SonusBase:
         self._asr_task: Optional[asyncio.Task] = None
         self._asr_queue: "Optional[asyncio.Queue[Event]]" = None   
         self.reco_timeout_task: int = 0 # Optional[asyncio.Task] = None
+        self.wait_timeout_task: int = 0 # Optional[asyncio.Task] = None
         self._tts_task: Optional[asyncio.Task] = None
         self._tts_queue: "Optional[asyncio.Queue[Event]]" = None  
         self.speakQueue: "Optional[asyncio.Queue[PrintRequest]]" = None 
@@ -130,6 +131,12 @@ class SonusBase:
         """Remove writer."""
         self.server_id = None
         self._writer = None
+        self.setState(State.IDLE)
+        self.is_running:bool = False
+        self.mic_is_running: bool = False
+        self.is_streaming:bool = False    
+        self.finalTranscriptReceived:bool = False
+        self.FinalTranscriptRequested:bool = False            
         _LOGGER.debug("Server disconnected")
     
     async def handle_event(self, event: Event) -> bool:
@@ -180,39 +187,42 @@ class SonusBase:
                         await self.forwardEvent(event, self._asr_queue)                            
                         if self.checkTimeout('self.reco_timeout_task') is True:      
                             # still hearing sound past timeout, no transcript event yet, maybe mic hung?                      
-                            await self.triggerEndOfTranscript('self.reco_timeout_task')                            
+                            await self.triggerEndOfTranscript('self.reco_timeout_task') 
+                            self.setTimeout('self.wait_timeout_task', self.config_info["stt"]["wait_timeout"],self._asr_queue, "wait timeout", True )                           
                         else:
                             # lets give the speaker more time.
                             self.setTimeout('self.reco_timeout_task', self.config_info["stt"]["transcript_timeout"],self._asr_queue, "transcript timeout", True )                      
                    else:
                         # now silence, user stopped speaking, add stop event on queue as last
-                        _LOGGER.debug("state=%s",self.state)
-                        if self.checkTimeout('self.reco_timeout_task') is True:                            
-                            await self.triggerEndOfTranscript('self.reco_timeout_task')                                                              
+                        _LOGGER.debug("state=%s user stopped speaking",self.state)
+                        #if self.checkTimeout('self.reco_timeout_task') is True:                            
+                        await self.triggerEndOfTranscript('self.reco_timeout_task')     
+                        self.setTimeout('self.wait_timeout_task', self.config_info["stt"]["wait_timeout"],self._asr_queue, "transcript timeout", True )                                                         
                 else:     
                     _LOGGER.debug("sending audio chunk to sound service")
-                    await self.forwardEvent(event, self._snd_queue)                      
+                    if self._snd_task is not None:
+                        await self.forwardEvent(event, self._snd_queue)                      
 
             elif self.state is State.WAITING:  
                 # waiting for the Transcription, toss all input  
                 _LOGGER.debug("waiting for transcription or something, user still speaking?")
                 if self.isSilence(event, CONSECUTIVE_SILENCE_FRAMES) is False:
                     _LOGGER.debug("user still speaking")
-                    #self.setTimeout('self.reco_timeout_task', self.config_info["stt"]["transcript_timeout"],self._asr_queue, "transcript timeout", True )                      
+                    #self.setTimeout('self.wait_timeout_task', self.config_info["stt"]["wait_timeou"],self._asr_queue, "transcript timeout", True )                      
                 else:
                     _LOGGER.debug("user not speaking, we are waiting for transcipt to arrive")
-                    if self.checkTimeout('self.reco_timeout_task') is True:      
+                    if self.checkTimeout('self.wait_timeout_task') is True:      
                         if self.FinalTranscriptRequested == True and self.finalTranscriptReceived == True:
                              _LOGGER.debug("setting idle state ")
                              self.is_streaming= False;
                              self.setState(State.IDLE)                            
                         else:
                             # still hearing sound past timout, no transcript event yet, maybe mic hung?                      
-                            await self.triggerEndOfTranscript('self.reco_timeout_task')    
+                            await self.triggerEndOfTranscript('self.wait_timeout_task')    
                     else: 
                         _LOGGER.debug("no transcript yet")            
-                _LOGGER.debug("waiting a little")
-                await asyncio.sleep(.5)
+                #_LOGGER.debug("waiting a little")
+                #await asyncio.sleep(.5)
 
             
         #
@@ -256,8 +266,8 @@ class SonusBase:
             if "is_final" in event.data and event.data["is_final"] is False :
                 _LOGGER.debug("more transcript to come")
                 self.setTimeout('self.reco_timeout_task', self.config_info["stt"]["transcript_timeout"],self._asr_queue, "transcript timeout", True )
-                if self.state is not State.IDLE:
-                    await self.notifyManager(2, transcript, False)
+                #if self.state is not State.IDLE:
+                await self.notifyManager(2, transcript, False)
                 return True
             else:               
                 if self.state != State.IDLE:                
@@ -314,52 +324,31 @@ class SonusBase:
     def setState(self, value:State)->None:
         self.state=value
         self.frame_count = 0
+
         
     async def triggerEndOfTranscript(self, taskname:str)-> None:
-            _LOGGER.debug("was processing for text, now silence, trigger text")
-        #self.cancelTimeout(taskname)                                                                         
+        _LOGGER.debug("was processing for text, now silence, trigger text")
+        self.cancelTimeout(taskname)                                                                         
         #if self.cli_args.incrementalTranscription is True and self.finalTranscriptReceived is True:                            
         #    self.setState( State.IDLE ) 
         #else:        
-            self.setState( State.WAITING )
-            # send an audio stop after any queued sounds
-            if not self.FinalTranscriptRequested:
-                self.FinalTranscriptRequested = True
-                await self.sendEvent(AudioStop().event(), self._asr_queue) 
+        self.setState( State.WAITING )
+        self._reset_vad()
+        self.is_streaming = False;              
+        # send an audio stop after any queued sounds
+        if not self.FinalTranscriptRequested:
+            _LOGGER.debug("sending AudioStop")
+            self.FinalTranscriptRequested = True
+            await self.sendEvent(AudioStop().event(), self._asr_queue) 
 
     def cancelTimeout(self,timerTask:str):
         if timerTask == 'self.reco_timeout_task':
             if self.reco_timeout_task is not 0:
                 self.reco_timeout_task= 0
+        elif timerTask == 'self.wait_timeout_task':
+            if self.wait_timeout_task is not 0:
+                self.wait_timeout_task= 0                                    
 
-    async def cancelTimeout1(self,timerTask:str):
-        if timerTask == 'self.reco_timeout_task':
-            if self.reco_timeout_task is not None:
-                try:
-                    self.reco_timeout_task.cancel() 
-                finally:    
-                    _LOGGER.debug("task canceled")
-                    self.reco_timeout_task= None  
-            else:
-                _LOGGER.debug("no task to cancel")  
-        else:
-            _LOGGER.debug("unknown task to cancel")                     
-
-    #
-    #
-    #
-    def setVar(self,key:str, value:int)->None:
-        if key == 'self.reco_timeout_task':
-            self.reco_timeout_task = value    
-            if self.reco_timeout_task is 0 and value is not 0:
-                _LOGGER.debug("unable to set the task holder")
-    #
-
-    def setVar1(self,key:str, value:asyncio.Task)->None:
-        if key == 'self.reco_timeout_task':
-            self.reco_timeout_task = value    
-            if self.reco_timeout_task is None and value is not None:
-                _LOGGER.debug("unable to set the task holder")
     #
     #
     #
@@ -367,70 +356,34 @@ class SonusBase:
         return int(time.time()*1000.0)
     
     def setTimeout(self,taskname:str, timeout: Union[int, float], queue:asyncio.Queue, message: str, restart:bool) -> None:
-        '''
-        if restart is True:
-           if taskname == 'self.reco_timeout_task':
-                _LOGGER.debug("canceling "+taskname)                
-                self.setVar(taskname,0)
-        '''                
+              
         if taskname == 'self.reco_timeout_task':   
             now = self.timeInMs()
             self.reco_timeout_task =round((timeout*1000)+now)
-            _LOGGER.debug("new timeout set to %d now = %d", self.reco_timeout_task ,now)
+            _LOGGER.debug("new reco timeout set to %d now = %d", self.reco_timeout_task ,now)
+
+        elif taskname == 'self.wait_timeout_task':   
+            now = self.timeInMs()
+            self.wait_timeout_task =round((timeout*1000)+now)
+            _LOGGER.debug("new wait timeout set to %d now = %d", self.wait_timeout_task ,now)            
 
     def checkTimeout(self, taskname:str)-> bool:
         if taskname == 'self.reco_timeout_task':
             now = self.timeInMs()
-            _LOGGER.debug("checking timeout %d < now = %d",self.reco_timeout_task, now )
+            _LOGGER.debug("checking  reco timeout %d < now = %d",self.reco_timeout_task, now )
             if self.reco_timeout_task < now:
-                _LOGGER.debug("timeout")
+                _LOGGER.debug("reco timeout")
                 return True
             else:
                 return False
-
-    async def setTimeout1(self,taskname:str, timeout: Union[int, float], queue:asyncio.Queue, message: str, restart:bool) -> None:
-        if restart is True:
-           if taskname == 'self.reco_timeout_task':
-                _LOGGER.debug("canceling "+taskname)
-                self.reco_timeout_task.cancel()
-                self.setVar(taskname,None)
-        try: 
-            _LOGGER.debug("starting timer for "+message+ " for %f seconds sleep delay=%f", timeout, timeout+1)
-            async with asyncio.timeout(timeout):                
-                task= asyncio.create_task(self.sleeproutine(timeout+1)) # force longer than 
-                self.setVar(taskname, task)
-                await task
-            _LOGGER.debug("timer task await is over-------------------------")
-
-        except asyncio.TimeoutError:             
-            _LOGGER.debug("wait for asr =====  timeout") 
-        except TimeoutError:             
-            _LOGGER.debug("wait for asr =====  sleep timeout")                                   
-        except asyncio.CancelledError:  
-            _LOGGER.debug("timer canceled, do nothing")              
-            return                 
-        else:                           
-            _LOGGER.debug("setTimeout finally")   
-            #if self.cli_args.incrementalTranscription != True or self.finalTranscriptReceived != False:
-            self.setState(State.LISTENING)
-            self.setVar(taskname,0)
-            _LOGGER.debug(message)
-            await self.sendEvent(AudioStop().event(), queue)
-            #else:
-            #    _LOGGER.debug("wait ended, no actions")    
-
-    '''
-        dummy routine to use for timeout handling
-        this routine should never actually DO anything other than sleep
-    '''    
-    
-    async def sleeproutine(self, time) -> None:
-        #try:
-            await asyncio.sleep(time)
-        #except TimeoutError:
-        #    _LOGGER.debug("sleep routine timeout error")            
-        #except asyncio.CancelledError:
-        #    _LOGGER.debug("sleep routine asyncio canceled")                
+        elif taskname == 'self.wait_timeout_task':
+            now = self.timeInMs()
+            _LOGGER.debug("checking wait timeout %d < now = %d",self.wait_timeout_task, now )
+            if self.wait_timeout_task < now:
+                _LOGGER.debug("wait timeout")
+                return True
+            else:
+                return False                           
 
     async def event_from_server(self, event: Event) -> None:
         await self.handle_event(event)
