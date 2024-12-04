@@ -110,6 +110,8 @@ class SonusBase:
             threshold=self.config_info['vad']['threshold'], trigger_level=self.config_info['vad']['trigger_level']
         )
         self.frame_count:int = 0
+        self.waitCount:int = 0
+        self.waitLimit:int = 3
         
         _LOGGER.debug("incremental transcription=%r",self.cli_args.incrementalTranscription)
         # Timestamp in the future when we will have timed out (set with
@@ -207,18 +209,36 @@ class SonusBase:
                 # waiting for the Transcription, toss all input  
                 _LOGGER.debug("waiting for transcription or something, user still speaking?")
                 if self.isSilence(event, CONSECUTIVE_SILENCE_FRAMES) is False:
-                    _LOGGER.debug("user still speaking")
-                    #self.setTimeout('self.wait_timeout_task', self.config_info["stt"]["wait_timeou"],self._asr_queue, "transcript timeout", True )                      
+                    _LOGGER.debug("user still speaking, add some time for them to finish")
+                    self.setTimeout('self.wait_timeout_task', self.config_info["stt"]["wait_timeout"],self._asr_queue, "wait timeout", True )                      
                 else:
                     _LOGGER.debug("user not speaking, we are waiting for transcipt to arrive")
-                    if self.checkTimeout('self.wait_timeout_task') is True:      
-                        if self.FinalTranscriptRequested == True and self.finalTranscriptReceived == True:
-                             _LOGGER.debug("setting idle state ")
-                             self.is_streaming= False;
-                             self.setState(State.IDLE)                            
+                    if self.checkTimeout('self.wait_timeout_task') is True:
+                        _LOGGER.debug("wait timeout expired")                              
+                        if self.FinalTranscriptRequested == True: 
+                            _LOGGER.debug("we have already requested transcript")
+                            if self.finalTranscriptReceived == True:
+                                _LOGGER.debug("transcript was received, setting idle state ")
+                                self.is_streaming= False;
+                                self.setState(State.IDLE) 
+                            else:
+                                if self.waitCount>0: 
+                                    if ++self.waitCount<self.waitLimit:
+                                        _LOGGER.debug("we will wait a little longer")  
+                                        self.setTimeout('self.wait_timeout_task', self.config_info["stt"]["wait_timeout"],self._asr_queue, "wait timeout", True )  
+                                    else:
+                                        # give up waited enough
+                                        self.is_streaming= False;
+                                        self.setState(State.IDLE)                                                                                                   
+                                else:
+                                    self.waitCount=1    
+
                         else:
-                            # still hearing sound past timout, no transcript event yet, maybe mic hung?                      
+                            _LOGGER.debug("we haven't asked for transcript yet")
+                            # still hearing sound past timeout, no transcript event yet, maybe mic hung?                      
                             await self.triggerEndOfTranscript('self.wait_timeout_task')    
+                            self.is_streaming= False;
+                            self.setState(State.IDLE)                              
                     else: 
                         _LOGGER.debug("no transcript yet")            
                 #_LOGGER.debug("waiting a little")
@@ -230,7 +250,7 @@ class SonusBase:
         #            
         elif Detection.is_type(event.type):
             _LOGGER.debug("received hotword detection event")            
-            self.setState( State.PROCESSING_FOR_TEXT )
+   
             # start transcription
             _LOGGER.debug("change state to Transcribing")
             print("===>hotword<===")                      
@@ -238,9 +258,12 @@ class SonusBase:
             sys.stdout.flush()            
             self.finalTranscriptReceived = False
             self.FinalTranscriptRequested = False
+            _LOGGER.debug("setting transcript timeout")
+            self.setTimeout('self.reco_timeout_task', self.config_info["stt"]["transcript_timeout"],self._asr_queue, "transcript timeout", False )            
+            _LOGGER.debug("sending Transcibe to asr queue")
             await self.sendEvent(xTranscribe(sendPartials=self.cli_args.incrementalTranscription).event(), self._asr_queue)  
+            self.setState( State.PROCESSING_FOR_TEXT )            
             #
-            self.setTimeout('self.reco_timeout_task', self.config_info["stt"]["transcript_timeout"],self._asr_queue, "transcript timeout", False )
 
         #
         #   this is Hotword  NOT detected.. timed out 
@@ -275,6 +298,9 @@ class SonusBase:
                     if self.cli_args.incrementalTranscription is True:
                         self.finalTranscriptReceived = True                                                     
                     _LOGGER.debug("transcript response received ==>%s<==", transcript)
+                    if self.state == State.WAITING:
+                        # cancel any timeout remaining
+                        self.cancelTimeout("self.wait_timeout_task")
                     if self.speaking:
                         self.setState( State.WAITING )
                         _LOGGER.debug("sending Synthesize event")
@@ -580,11 +606,11 @@ class SonusBase:
         if destination != None:
             if event != None:
                 destination.put_nowait(event)
+                _LOGGER.debug("event type=%s added to queue",event.type)
             else:
                 _LOGGER.debug("no event found in send Event")    
         else:
             _LOGGER.debug("no send destination for event")            
-        return True
     
     '''
         forward an event to a particular service queue, from some other service

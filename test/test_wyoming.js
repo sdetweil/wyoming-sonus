@@ -18,12 +18,12 @@ client.on('data', (data) => {
   console.log("data 2="+partsdata.toString());
   parts = partsdata.split('\n')
   response = JSON.parse(parts[0])
-//  console.log("response part 1=",parts[0])
+  console.log("response part 1=",response)
   if(response.type=='hotword')
     console.log("!h:", 0)
   if(response.type=='command')
     try { 
-    console.log("!f",JSON.parse(parts[1]).text)
+      console.log("!f",JSON.parse(parts[1]).text)
     }
     catch(e){
       console.log("part2="+data)

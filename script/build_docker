@@ -4,7 +4,7 @@ latest_version=$(grep -m1  '^[##;]*[[:space:]]*[0-9]' CHANGELOG.md | awk '{print
 
 docker buildx build . -t "rhasspy/wyoming-sonus:$latest_version"  --platform linux/amd64 "$@"  --load
 
-docker buildx build . -t "rhasspy/wyoming-sonus:$latest_version"  --platform linux/arm64 "$@"  
+#docker buildx build . -t "rhasspy/wyoming-sonus:$latest_version"  --platform linux/arm64 "$@"  
 
 
-docker buildx build . -t "rhasspy/wyoming-sonus:$latest_version"  --platform linux/arm/v7 "$@"  
+#docker buildx build . -t "rhasspy/wyoming-sonus:$latest_version"  --platform linux/arm/v7 "$@"  
